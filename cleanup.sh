@@ -7,7 +7,7 @@
 set -e
 
 PROJECT_NAME="audio-dubbing"
-AWS_REGION="ap-south-1"
+AWS_REGION="ap-southeast-2"
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 
 echo "============================================================"

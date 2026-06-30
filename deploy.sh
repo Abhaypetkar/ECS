@@ -15,7 +15,7 @@ set -e
 
 # ---------- CONFIGURATION ----------
 PROJECT_NAME="audio-dubbing"
-AWS_REGION="ap-south-1"
+AWS_REGION="ap-southeast-2"
 GITHUB_REPO="https://github.com/Abhaypetkar/ECS.git"
 GITHUB_BRANCH="main"
 INSTANCE_TYPE="t2.micro"

@@ -43,18 +43,12 @@ Conditions:
   HasKeyPair: !Not [!Equals [!Ref KeyPairName, ""]]
 
 # ============================================================
-#  MAPPINGS - ECS Optimized AMI per region
+#  SSM PARAMETER - Auto-resolve ECS AMI for any region
 # ============================================================
-Mappings:
-  RegionAMI:
-    ap-south-1:
-      AMI: ami-0c768662cc797cd75
-    us-east-1:
-      AMI: ami-0c55b159cbfafe1f0
-    us-west-2:
-      AMI: ami-0d6621c01e8c2de2c
-    ap-southeast-1:
-      AMI: ami-091bf462afdb02c60
+  ECSOptimizedAMI:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ecs/optimized-ami/amazon-linux-2023/recommended/image_id
+    Description: ECS-optimized AMI (auto-resolved via SSM for your region)
 
 # ============================================================
 #  RESOURCES
@@ -351,7 +345,7 @@ Resources:
     Properties:
       LaunchTemplateName: !Sub "${ProjectName}-launch-template"
       LaunchTemplateData:
-        ImageId: !FindInMap [RegionAMI, !Ref "AWS::Region", AMI]
+        ImageId: !Ref ECSOptimizedAMI
         InstanceType: !Ref InstanceType
         KeyName: !If [HasKeyPair, !Ref KeyPairName, !Ref "AWS::NoValue"]
         IamInstanceProfile:
