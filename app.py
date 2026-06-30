@@ -10,12 +10,35 @@ import time
 import uuid
 import socket
 import os
+import json
+from urllib.request import urlopen
 from concurrent.futures import ThreadPoolExecutor
 
 app = Flask(__name__)
 
-# Track which instance this is
-INSTANCE_ID = os.environ.get("INSTANCE_ID", socket.gethostname())
+
+def get_instance_id():
+    """Auto-detect which EC2 instance/container we're running on"""
+    # Try ECS metadata endpoint first
+    metadata_uri = os.environ.get("ECS_CONTAINER_METADATA_URI_V4")
+    if metadata_uri:
+        try:
+            with urlopen(f"{metadata_uri}/task", timeout=2) as resp:
+                task_meta = json.loads(resp.read())
+                # Get the task ARN's short ID
+                task_arn = task_meta.get("TaskARN", "")
+                short_id = task_arn.split("/")[-1][:8] if task_arn else ""
+                return f"ECS-Task-{short_id}"
+        except Exception:
+            pass
+    # Fallback to environment variable or hostname
+    env_id = os.environ.get("INSTANCE_ID", "default")
+    if env_id != "default":
+        return env_id
+    return f"Container-{socket.gethostname()[:12]}"
+
+
+INSTANCE_ID = get_instance_id()
 CONTAINER_ID = socket.gethostname()
 
 # Thread pool for concurrent dubbing tasks (multi-threading)
