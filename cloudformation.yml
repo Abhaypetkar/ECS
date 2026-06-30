@@ -39,16 +39,13 @@ Parameters:
     Default: ""
     Description: SSH Key Pair name (optional, leave empty if not needed)
 
-Conditions:
-  HasKeyPair: !Not [!Equals [!Ref KeyPairName, ""]]
-
-# ============================================================
-#  SSM PARAMETER - Auto-resolve ECS AMI for any region
-# ============================================================
   ECSOptimizedAMI:
     Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
     Default: /aws/service/ecs/optimized-ami/amazon-linux-2023/recommended/image_id
     Description: ECS-optimized AMI (auto-resolved via SSM for your region)
+
+Conditions:
+  HasKeyPair: !Not [!Equals [!Ref KeyPairName, ""]]
 
 # ============================================================
 #  RESOURCES
