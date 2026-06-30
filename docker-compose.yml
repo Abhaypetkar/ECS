@@ -1,0 +1,50 @@
+version: "3.8"
+
+# This docker-compose simulates an ECS setup locally:
+# - 2 containers = 2 EC2 instances running the same Docker image
+# - Nginx = ALB (Application Load Balancer) distributing traffic
+# - Each container runs Gunicorn with 3 workers (multi-threading)
+
+services:
+
+  # -------- Simulates EC2 Instance 1 --------
+  dubbing-instance-1:
+    build: .
+    container_name: dubbing-instance-1
+    environment:
+      - INSTANCE_ID=EC2-Instance-1
+      - MAX_WORKERS=3
+    ports:
+      - "5001:5000"  # Direct access for debugging
+    networks:
+      - dubbing-network
+
+  # -------- Simulates EC2 Instance 2 --------
+  dubbing-instance-2:
+    build: .
+    container_name: dubbing-instance-2
+    environment:
+      - INSTANCE_ID=EC2-Instance-2
+      - MAX_WORKERS=3
+    ports:
+      - "5002:5000"  # Direct access for debugging
+    networks:
+      - dubbing-network
+
+  # -------- Simulates ALB (Load Balancer) --------
+  load-balancer:
+    image: nginx:alpine
+    container_name: load-balancer
+    ports:
+      - "80:80"  # Access everything through port 80
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - dubbing-instance-1
+      - dubbing-instance-2
+    networks:
+      - dubbing-network
+
+networks:
+  dubbing-network:
+    driver: bridge

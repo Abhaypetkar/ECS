@@ -1,0 +1,43 @@
+{
+    "family": "audio-dubbing-task",
+    "networkMode": "awsvpc",
+    "requiresCompatibilities": ["EC2"],
+    "cpu": "512",
+    "memory": "1024",
+    "executionRoleArn": "arn:aws:iam::YOUR_ACCOUNT_ID:role/ecsTaskExecutionRole",
+    "containerDefinitions": [
+        {
+            "name": "dubbing-container",
+            "image": "YOUR_ACCOUNT_ID.dkr.ecr.ap-south-1.amazonaws.com/audio-dubbing:latest",
+            "cpu": 512,
+            "memory": 1024,
+            "essential": true,
+            "portMappings": [
+                {
+                    "containerPort": 5000,
+                    "hostPort": 5000,
+                    "protocol": "tcp"
+                }
+            ],
+            "environment": [
+                { "name": "MAX_WORKERS", "value": "3" },
+                { "name": "INSTANCE_ID", "value": "auto" }
+            ],
+            "healthCheck": {
+                "command": ["CMD-SHELL", "curl -f http://localhost:5000/health || exit 1"],
+                "interval": 30,
+                "timeout": 5,
+                "retries": 3,
+                "startPeriod": 60
+            },
+            "logConfiguration": {
+                "logDriver": "awslogs",
+                "options": {
+                    "awslogs-group": "/ecs/audio-dubbing",
+                    "awslogs-region": "ap-south-1",
+                    "awslogs-stream-prefix": "ecs"
+                }
+            }
+        }
+    ]
+}

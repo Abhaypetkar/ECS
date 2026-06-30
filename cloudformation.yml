@@ -1,0 +1,501 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Audio Dubbing ECS Demo with CodeBuild
+  Creates: VPC, ALB, ECS Cluster (2 EC2 instances), ECR, CodeBuild, Auto Scaling
+  Source: GitHub repo -> CodeBuild builds Docker image -> ECR -> ECS deploys
+
+# ============================================================
+#  PARAMETERS
+# ============================================================
+Parameters:
+  ProjectName:
+    Type: String
+    Default: audio-dubbing
+    Description: Name prefix for all resources
+
+  GitHubRepo:
+    Type: String
+    Default: https://github.com/Abhaypetkar/ECS.git
+    Description: GitHub repository URL
+
+  GitHubBranch:
+    Type: String
+    Default: main
+    Description: GitHub branch to build from
+
+  InstanceType:
+    Type: String
+    Default: t2.micro
+    AllowedValues: [t2.micro, t2.small, t2.medium, t3.micro, t3.small]
+    Description: EC2 instance type (t2.micro = free tier)
+
+  DesiredInstances:
+    Type: Number
+    Default: 2
+    Description: Number of EC2 instances (2 for demo)
+
+  KeyPairName:
+    Type: String
+    Default: ""
+    Description: SSH Key Pair name (optional, leave empty if not needed)
+
+Conditions:
+  HasKeyPair: !Not [!Equals [!Ref KeyPairName, ""]]
+
+# ============================================================
+#  MAPPINGS - ECS Optimized AMI per region
+# ============================================================
+Mappings:
+  RegionAMI:
+    ap-south-1:
+      AMI: ami-0c768662cc797cd75
+    us-east-1:
+      AMI: ami-0c55b159cbfafe1f0
+    us-west-2:
+      AMI: ami-0d6621c01e8c2de2c
+    ap-southeast-1:
+      AMI: ami-091bf462afdb02c60
+
+# ============================================================
+#  RESOURCES
+# ============================================================
+Resources:
+
+  # ==================== ECR REPOSITORY ====================
+  ECRRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Ref ProjectName
+      ImageScanningConfiguration:
+        ScanOnPush: false
+
+  # ==================== VPC & NETWORKING ====================
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-vpc"
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-igw"
+
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-subnet-1"
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.2.0/24
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-subnet-2"
+
+  RouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref RouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  SubnetRouteAssociation1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet1
+      RouteTableId: !Ref RouteTable
+
+  SubnetRouteAssociation2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet2
+      RouteTableId: !Ref RouteTable
+
+  # ==================== SECURITY GROUPS ====================
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow HTTP traffic to ALB
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-alb-sg"
+
+  ECSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow traffic from ALB to ECS instances
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 0
+          ToPort: 65535
+          SourceSecurityGroupId: !Ref ALBSecurityGroup
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-ecs-sg"
+
+  # ==================== ALB (LOAD BALANCER) ====================
+  ApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub "${ProjectName}-alb"
+      Scheme: internet-facing
+      Type: application
+      Subnets:
+        - !Ref PublicSubnet1
+        - !Ref PublicSubnet2
+      SecurityGroups:
+        - !Ref ALBSecurityGroup
+
+  ALBTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub "${ProjectName}-tg"
+      Port: 5000
+      Protocol: HTTP
+      VpcId: !Ref VPC
+      TargetType: instance
+      HealthCheckPath: /health
+      HealthCheckIntervalSeconds: 30
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+
+  ALBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref ALBTargetGroup
+
+  # ==================== IAM ROLES ====================
+
+  # --- ECS Instance Role (for EC2 instances in the cluster) ---
+  ECSInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ProjectName}-ecs-instance-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+
+  ECSInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref ECSInstanceRole
+
+  # --- ECS Task Execution Role ---
+  ECSTaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ProjectName}-task-exec-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+
+  # --- CodeBuild Role (needs ECR push + CloudWatch logs) ---
+  CodeBuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ProjectName}-codebuild-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CodeBuildPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # ECR permissions (push Docker images)
+              - Effect: Allow
+                Action:
+                  - ecr:GetAuthorizationToken
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:BatchGetImage
+                  - ecr:PutImage
+                  - ecr:InitiateLayerUpload
+                  - ecr:UploadLayerPart
+                  - ecr:CompleteLayerUpload
+                Resource: "*"
+              # CloudWatch Logs
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: "*"
+              # S3 for artifacts
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:GetBucketAcl
+                  - s3:GetBucketLocation
+                Resource: "*"
+              # STS for account ID
+              - Effect: Allow
+                Action:
+                  - sts:GetCallerIdentity
+                Resource: "*"
+
+  # ==================== CODEBUILD PROJECT ====================
+  # This replaces local Docker! CodeBuild pulls from GitHub,
+  # builds the Docker image, and pushes to ECR.
+  CodeBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub "${ProjectName}-build"
+      Description: "Builds Docker image from GitHub and pushes to ECR"
+      ServiceRole: !GetAtt CodeBuildRole.Arn
+      Artifacts:
+        Type: NO_ARTIFACTS
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/amazonlinux2-x86_64-standard:4.0
+        PrivilegedMode: true  # Required for Docker builds!
+        EnvironmentVariables:
+          - Name: AWS_DEFAULT_REGION
+            Value: !Ref "AWS::Region"
+          - Name: IMAGE_REPO_NAME
+            Value: !Ref ProjectName
+          - Name: IMAGE_TAG
+            Value: latest
+      Source:
+        Type: GITHUB
+        Location: !Ref GitHubRepo
+        BuildSpec: buildspec.yml
+        GitCloneDepth: 1
+      SourceVersion: !Ref GitHubBranch
+      TimeoutInMinutes: 15
+      LogsConfig:
+        CloudWatchLogs:
+          GroupName: !Ref CodeBuildLogGroup
+          Status: ENABLED
+
+  CodeBuildLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/codebuild/${ProjectName}"
+      RetentionInDays: 7
+
+  # ==================== ECS CLUSTER ====================
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub "${ProjectName}-cluster"
+
+  # ==================== EC2 LAUNCH TEMPLATE ====================
+  ECSLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: !Sub "${ProjectName}-launch-template"
+      LaunchTemplateData:
+        ImageId: !FindInMap [RegionAMI, !Ref "AWS::Region", AMI]
+        InstanceType: !Ref InstanceType
+        KeyName: !If [HasKeyPair, !Ref KeyPairName, !Ref "AWS::NoValue"]
+        IamInstanceProfile:
+          Arn: !GetAtt ECSInstanceProfile.Arn
+        SecurityGroupIds:
+          - !Ref ECSSecurityGroup
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            echo ECS_CLUSTER=${ECSCluster} >> /etc/ecs/ecs.config
+
+  # ==================== AUTO SCALING GROUP (2 EC2 Instances) ====================
+  ECSAutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      AutoScalingGroupName: !Sub "${ProjectName}-asg"
+      LaunchTemplate:
+        LaunchTemplateId: !Ref ECSLaunchTemplate
+        Version: !GetAtt ECSLaunchTemplate.LatestVersionNumber
+      MinSize: !Ref DesiredInstances
+      MaxSize: 4
+      DesiredCapacity: !Ref DesiredInstances
+      VPCZoneIdentifier:
+        - !Ref PublicSubnet1
+        - !Ref PublicSubnet2
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-ecs-instance"
+          PropagateAtLaunch: true
+
+  # ==================== ECS TASK DEFINITION ====================
+  ECSTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub "${ProjectName}-task"
+      NetworkMode: bridge
+      RequiresCompatibilities:
+        - EC2
+      ExecutionRoleArn: !GetAtt ECSTaskExecutionRole.Arn
+      ContainerDefinitions:
+        - Name: dubbing-container
+          Image: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${ProjectName}:latest"
+          Cpu: 256
+          Memory: 512
+          Essential: true
+          PortMappings:
+            - ContainerPort: 5000
+              HostPort: 0  # Dynamic port mapping for ALB
+              Protocol: tcp
+          Environment:
+            - Name: MAX_WORKERS
+              Value: "3"
+          HealthCheck:
+            Command:
+              - CMD-SHELL
+              - curl -f http://localhost:5000/health || exit 1
+            Interval: 30
+            Timeout: 5
+            Retries: 3
+            StartPeriod: 60
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref ECSLogGroup
+              awslogs-region: !Ref "AWS::Region"
+              awslogs-stream-prefix: ecs
+
+  # ==================== ECS SERVICE ====================
+  ECSService:
+    Type: AWS::ECS::Service
+    DependsOn: ALBListener
+    Properties:
+      ServiceName: !Sub "${ProjectName}-service"
+      Cluster: !Ref ECSCluster
+      TaskDefinition: !Ref ECSTaskDefinition
+      DesiredCount: !Ref DesiredInstances
+      LaunchType: EC2
+      LoadBalancers:
+        - ContainerName: dubbing-container
+          ContainerPort: 5000
+          TargetGroupArn: !Ref ALBTargetGroup
+      DeploymentConfiguration:
+        MinimumHealthyPercent: 50
+        MaximumPercent: 200
+
+  # ==================== AUTO SCALING FOR ECS SERVICE ====================
+  ECSServiceScalingTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    Properties:
+      MaxCapacity: 6
+      MinCapacity: 2
+      ResourceId: !Sub "service/${ECSCluster}/${ECSService.Name}"
+      ScalableDimension: ecs:service:DesiredCount
+      ServiceNamespace: ecs
+      RoleARN: !Sub "arn:aws:iam::${AWS::AccountId}:role/aws-service-role/ecs.application-autoscaling.amazonaws.com/AWSServiceRoleForApplicationAutoScaling_ECSService"
+
+  ECSServiceScalingPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: !Sub "${ProjectName}-cpu-scaling"
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref ECSServiceScalingTarget
+      TargetTrackingScalingPolicyConfiguration:
+        TargetValue: 70.0
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageCPUUtilization
+        ScaleInCooldown: 60
+        ScaleOutCooldown: 60
+
+  # ==================== CLOUDWATCH LOGS ====================
+  ECSLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/ecs/${ProjectName}"
+      RetentionInDays: 7
+
+# ============================================================
+#  OUTPUTS
+# ============================================================
+Outputs:
+  LoadBalancerURL:
+    Description: "ALB URL - Send your 6 dubbing requests here"
+    Value: !Sub "http://${ApplicationLoadBalancer.DNSName}"
+
+  ECRRepositoryUri:
+    Description: "ECR Repository URI"
+    Value: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${ProjectName}"
+
+  CodeBuildProjectName:
+    Description: "CodeBuild Project - Trigger a build here"
+    Value: !Ref CodeBuildProject
+
+  ClusterName:
+    Description: "ECS Cluster Name"
+    Value: !Ref ECSCluster
+
+  ServiceName:
+    Description: "ECS Service Name"
+    Value: !GetAtt ECSService.Name
+
+  LogGroup:
+    Description: "CloudWatch Logs"
+    Value: !Ref ECSLogGroup
+
+  HowToUse:
+    Description: "Next Steps"
+    Value: "1) Go to CodeBuild console -> Start Build. 2) After build succeeds, update ECS service. 3) Run test_6_requests.py with ALB URL"
